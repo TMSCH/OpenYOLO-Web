@@ -14,12 +14,11 @@
  * limitations under the License.
  */
 
-import {AUTHENTICATION_METHODS, Credential, CredentialRequestOptions} from '../protocol/data';
-import {credentialResultMessage, noneAvailableMessage, retrieveMessage, showProviderMessage} from '../protocol/rpc_messages';
+import {AUTHENTICATION_METHODS, OpenYoloCredential, OpenYoloCredentialRequestOptions} from '../protocol/data';
+import {credentialResultMessage, retrieveMessage, showProviderMessage} from '../protocol/rpc_messages';
 import {SecureChannel} from '../protocol/secure_channel';
 import {FakeProviderConnection} from '../test_utils/channels';
 import {createSpyFrame} from '../test_utils/frames';
-import {JasmineTimeoutManager} from '../test_utils/timeout';
 
 import {CredentialRequest} from './credential_request';
 import {ProviderFrameElement} from './provider_frame_elem';
@@ -30,7 +29,7 @@ describe('CredentialRequest', () => {
   let clientChannel: SecureChannel;
   let providerChannel: SecureChannel;
   let frame: ProviderFrameElement;
-  let timeoutManager = new JasmineTimeoutManager();
+  const options: OpenYoloCredentialRequestOptions = {supportedAuthMethods: []};
 
   beforeEach(() => {
     connection = new FakeProviderConnection();
@@ -40,23 +39,16 @@ describe('CredentialRequest', () => {
     providerChannel = connection.providerChannel;
     request = new CredentialRequest(frame, clientChannel);
     spyOn(request, 'dispose').and.callThrough();
-    timeoutManager.install();
   });
 
   afterEach(() => {
     request.dispose();
-    timeoutManager.uninstall();
   });
 
   describe('dispatch', () => {
-    it('should timeout in 5 sec', done => {
-      request.dispatch().then(() => done.fail(), () => done());
-      jasmine.clock().tick(5001);
-    });
-
     it('should send a RPC message through the channel', () => {
       spyOn(clientChannel, 'send').and.callThrough();
-      let options: CredentialRequestOptions = {
+      let options: OpenYoloCredentialRequestOptions = {
         supportedAuthMethods: ['openyolo://id-and-password']
       };
       request.dispatch(options);
@@ -67,31 +59,18 @@ describe('CredentialRequest', () => {
 
   describe('response handling', () => {
     it('should display the frame if there are credentials', () => {
-      request.dispatch();
+      request.dispatch(options);
       providerChannel.send(showProviderMessage(request.id, {height: 200}));
       expect(frame.display).toHaveBeenCalled();
     });
 
-    it('should resolve with nothing if no credential', async function(done) {
-      let dispatchPromise = request.dispatch();
-      providerChannel.send(noneAvailableMessage(request.id));
-      try {
-        let result = await dispatchPromise;
-        expect(result).toBeNull();
-        expect(request.dispose).toHaveBeenCalled();
-        done();
-      } catch (err) {
-        done.fail(`Dispatch failed: ${err}`);
-      }
-    });
-
     it('should resolve with credential on success', async function(done) {
-      let credential: Credential = {
+      let credential: OpenYoloCredential = {
         id: 'alice@gmail.com',
         authMethod: AUTHENTICATION_METHODS.ID_AND_PASSWORD,
         displayName: 'Google'
       };
-      let requestPromise = request.dispatch();
+      let requestPromise = request.dispatch(options);
       providerChannel.send(credentialResultMessage(request.id, credential));
       try {
         let result = await requestPromise;
@@ -103,20 +82,8 @@ describe('CredentialRequest', () => {
       }
     });
 
-    it('should return null when no credentials', async function(done) {
-      let resultPromise = request.dispatch();
-      providerChannel.send(noneAvailableMessage(request.id));
-      try {
-        let result = await resultPromise;
-        expect(result).toBeNull();
-        done();
-      } catch (err) {
-        fail('Promise should resolve');
-      }
-    });
-
     it('should ignore when different id', () => {
-      request.dispatch();
+      request.dispatch(options);
       let credential = {
         id: 'alice@gmail.com',
         authMethod: AUTHENTICATION_METHODS.ID_AND_PASSWORD,

@@ -14,8 +14,9 @@
  * limitations under the License.
  */
 
-import {AUTHENTICATION_METHODS, Credential as OpenYoloCredential, CredentialHintOptions, CredentialRequestOptions as OpenYoloCredentialRequestOptions, ProxyLoginResponse} from '../protocol/data';
-import {OpenYoloError} from '../protocol/errors';
+import {AUTHENTICATION_METHODS, OpenYoloCredential, OpenYoloCredentialHintOptions, OpenYoloCredentialRequestOptions, OpenYoloProxyLoginResponse} from '../protocol/data';
+import {OpenYoloInternalError} from '../protocol/errors';
+import {isSecureOrigin} from '../protocol/utils';
 
 import {OpenYoloApi} from './api';
 
@@ -43,7 +44,7 @@ function convertRequestOptions(options?: OpenYoloCredentialRequestOptions):
     authMethods.splice(passwordIndex, 1);
   }
   // Pass in the remaining providers options, if any.
-  convertedOptions.federated.providers = authMethods;
+  convertedOptions.federated!.providers = authMethods;
   return convertedOptions;
 }
 
@@ -52,19 +53,21 @@ function convertRequestOptions(options?: OpenYoloCredentialRequestOptions):
  */
 function convertCredentialToOpenYolo(credential: PasswordCredential|
                                      FederatedCredential): OpenYoloCredential {
-  let authMethod = credential.type === 'federated' ?
+  const authMethod = credential.type === 'federated' ?
       (credential as FederatedCredential).provider :
       AUTHENTICATION_METHODS.ID_AND_PASSWORD;
 
-  let convertedCredential: OpenYoloCredential = {
+  const convertedCredential: OpenYoloCredential = {
     id: credential.id,
     authMethod: authMethod,
-    displayName: credential.name,
-    profilePicture: credential.iconURL,
-    // navigator.credentials do not pass the password directly, so proxyLogin
-    // has to be used.
-    proxiedAuthRequired: credential.type === 'password'
+    displayName: credential.name || undefined,
+    profilePicture: credential.iconURL || undefined,
+    proxiedAuthRequired: false
   };
+  // Chrome M60+ returns the password.
+  if (credential instanceof PasswordCredential) {
+    convertedCredential.password = credential.password;
+  }
 
   return convertedCredential;
 }
@@ -75,16 +78,16 @@ function convertCredentialToOpenYolo(credential: PasswordCredential|
 function convertCredentialFromOpenYolo(credential: OpenYoloCredential):
     Credential {
   if (credential.authMethod === AUTHENTICATION_METHODS.ID_AND_PASSWORD) {
-    let convertedCredential = new PasswordCredential({
+    const convertedCredential = new PasswordCredential({
       id: credential.id,
       type: 'password',
       name: credential.displayName,
       iconURL: credential.profilePicture,
       password: credential.password
-    });
+    } as PasswordCredentialData);
     return convertedCredential;
   } else {
-    let convertedCredential = new FederatedCredential({
+    const convertedCredential = new FederatedCredential({
       id: credential.id,
       name: credential.displayName,
       iconURL: credential.profilePicture,
@@ -134,6 +137,41 @@ class CredentialsMap {
 }
 
 /**
+ * A No-Op navigator.credentials wrapper to be used in-lieu of the real one in
+ * browsers that don't implement navigator.credentials.
+ */
+export class NoOpNavigatorCredentials implements OpenYoloApi {
+  disableAutoSignIn(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  async retrieve(options?: OpenYoloCredentialRequestOptions):
+      Promise<OpenYoloCredential> {
+    throw OpenYoloInternalError.noCredentialsAvailable().toExposedError();
+  }
+
+  async save(credential: OpenYoloCredential): Promise<void> {}
+
+  async hint(options?: OpenYoloCredentialHintOptions):
+      Promise<OpenYoloCredential> {
+    throw OpenYoloInternalError.noCredentialsAvailable().toExposedError();
+  }
+
+  async hintsAvailable(): Promise<boolean> {
+    return false;
+  }
+
+  async cancelLastOperation(): Promise<void> {}
+
+  async proxyLogin(credential: OpenYoloCredential):
+      Promise<OpenYoloProxyLoginResponse> {
+    throw OpenYoloInternalError
+        .requestFailed('Cannot proxy login through the browser.')
+        .toExposedError();
+  }
+}
+
+/**
  * Wrapper of navigator.credentials exposing the same API than OpenYolo.
  *
  * TODO(tch): wrap navigator.credentials errors in OpenYolo errors.
@@ -141,57 +179,100 @@ class CredentialsMap {
 export class NavigatorCredentials implements OpenYoloApi {
   private credentialsMap: CredentialsMap = new CredentialsMap();
 
-  disableAutoSignIn(): Promise<void> {
-    return navigator.credentials.requireUserMediation();
-  }
+  constructor(private cmApi: CredentialsContainer) {}
 
-  retrieve(options?: OpenYoloCredentialRequestOptions):
-      Promise<OpenYoloCredential> {
-    let convertedOptions = convertRequestOptions(options);
-    return navigator.credentials.get(convertedOptions).then((cred) => {
-      if (!cred) return;
-      this.credentialsMap.insert(cred);
-      return convertCredentialToOpenYolo(
-          cred as FederatedCredential | PasswordCredential);
-    });
-  }
-
-  save(credential: OpenYoloCredential): Promise<void> {
-    let convertedCredential = convertCredentialFromOpenYolo(credential);
-    return navigator.credentials.store(convertedCredential).then((cred) => {
-      // Return nothing as per OpenYolo specs.
+  async disableAutoSignIn(): Promise<void> {
+    try {
+      return await this.cmApi.requireUserMediation();
+    } catch (e) {
+      // Ignore error (i.e. non secure origins for instance).
       return;
-    });
+    }
   }
 
-  hint(options?: CredentialHintOptions): Promise<OpenYoloCredential> {
-    // Reject with a canceled error as no hints can be retrieved.
-    return Promise.reject(OpenYoloError.canceled());
+  async retrieve(options?: OpenYoloCredentialRequestOptions):
+      Promise<OpenYoloCredential> {
+    const convertedOptions = convertRequestOptions(options);
+    let credential;
+    try {
+      credential = await this.cmApi.get(convertedOptions);
+    } catch (e) {
+      throw OpenYoloInternalError.requestFailed('navigator.credentials error')
+          .toExposedError();
+    }
+    if (!credential) {
+      // navigator.credentials.get returns null whether the user has canceled or
+      // there is no credentials. The user may have canceled, but this error is
+      // more developer friendly.
+      throw OpenYoloInternalError.noCredentialsAvailable().toExposedError();
+    }
+    this.credentialsMap.insert(credential);
+    return convertCredentialToOpenYolo(
+        credential as FederatedCredential | PasswordCredential);
   }
 
-  hintsAvailable(): Promise<boolean> {
-    return Promise.resolve(false);
+  async save(credential: OpenYoloCredential): Promise<void> {
+    const convertedCredential = convertCredentialFromOpenYolo(credential);
+    try {
+      await this.cmApi.store(convertedCredential);
+    } catch (e) {
+      throw OpenYoloInternalError.requestFailed('navigator.credentials error')
+          .toExposedError();
+    }
   }
 
-  proxyLogin(credential: OpenYoloCredential): Promise<ProxyLoginResponse> {
+  async hint(options?: OpenYoloCredentialHintOptions):
+      Promise<OpenYoloCredential> {
+    throw OpenYoloInternalError.noCredentialsAvailable().toExposedError();
+  }
+
+  async hintsAvailable(): Promise<boolean> {
+    return false;
+  }
+
+  async cancelLastOperation(): Promise<void> {}
+
+  async proxyLogin(credential: OpenYoloCredential):
+      Promise<OpenYoloProxyLoginResponse> {
     // TODO(tch): Fetch the URL from configuration.
-    let url = `${window.location.protocol}//${window.location.host}/signin`;
+    const url = `${window.location.protocol}//${window.location.host}/signin`;
     const cred = this.credentialsMap.retrieve(
         CredentialsMap.getKeyFromOpenYoloCredential(credential));
     if (!cred || cred.type !== 'password') {
-      return Promise.reject(new Error('Invalid credential!'));
+      throw OpenYoloInternalError.requestFailed('Invalid credential.')
+          .toExposedError();
     }
 
-    return new Promise<ProxyLoginResponse>((resolve, reject) => {
-      fetch(url, {method: 'POST', credentials: cred}).then(resp => {
-        if (resp.status !== 200) {
-          reject(
-              OpenYoloError.requestFailed(`Error: status code ${resp.status}`));
-        }
-        resp.text().then(responseText => {
-          resolve({statusCode: resp.status, responseText: responseText});
-        });
-      });
-    });
+    let resp;
+    try {
+      resp = await fetch(url, {method: 'POST', credentials: cred});
+    } catch (e) {
+      throw OpenYoloInternalError.requestFailed(e.message).toExposedError();
+    }
+    if (resp.status !== 200) {
+      throw OpenYoloInternalError.requestFailed(`Status code ${resp.status}`)
+          .toExposedError();
+    }
+    const responseText = await resp.text();
+    return {statusCode: resp.status, responseText: responseText};
   }
+}
+
+/**
+ * Returns the navigator.credentials wrapper according to the environment. If
+ * navigator.credentials is not defined, or the current app not on https,
+ * it will create a no-op version of the API.
+ */
+export function createNavigatorCredentialsApi(): OpenYoloApi {
+  // As per
+  // https://developers.google.com/web/updates/2017/06/credential-management-updates#feature_detection_needs_attention,
+  // we check for the presence of preventSilentAccess in navigator.credentials
+  // that is a feature of M60+. Previous versions would not release plain-text
+  // passwords.
+  if (typeof navigator.credentials !== 'undefined' &&
+      typeof navigator.credentials.preventSilentAccess === 'function' &&
+      isSecureOrigin()) {
+    return new NavigatorCredentials(navigator.credentials);
+  }
+  return new NoOpNavigatorCredentials();
 }

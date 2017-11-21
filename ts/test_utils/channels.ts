@@ -75,7 +75,9 @@ export class FakeMessagePort implements MessagePort {
       type: string,
       listener?: EventListenerOrEventListenerObject,
       useCapture?: boolean): void {
-    this.listeners.remove(type, listener);
+    if (listener) {
+      this.listeners.remove(type, listener);
+    }
   }
 }
 
@@ -91,7 +93,7 @@ export class FakeProviderConnection {
     this.messageChannel = new FakeMessageChannel();
     this.clientPort = this.messageChannel.port1;
     this.providerPort = this.messageChannel.port2;
-    this.clientChannel = new SecureChannel(this.clientPort, false);
-    this.providerChannel = new SecureChannel(this.providerPort, true);
+    this.clientChannel = new SecureChannel(this.clientPort);
+    this.providerChannel = new SecureChannel(this.providerPort);
   }
 }

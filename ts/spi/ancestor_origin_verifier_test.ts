@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-import {OpenYoloError} from '../protocol/errors';
-import {POST_MESSAGE_TYPES, verifyAckMessage, verifyPingMessage} from '../protocol/post_messages';
+import {OpenYoloInternalError} from '../protocol/errors';
+import {PostMessageType, verifyAckMessage, verifyPingMessage} from '../protocol/post_messages';
 import {MockWindow} from '../test_utils/frames';
 import {createMessageEvent} from '../test_utils/messages';
 import {JasmineTimeoutManager} from '../test_utils/timeout';
@@ -61,10 +61,8 @@ describe('AncestorOriginVerifier', () => {
       // the verification message should be sent
       expect(postMessageSpy)
           .toHaveBeenCalledWith(
-              jasmine.objectContaining({
-                type: POST_MESSAGE_TYPES.verifyPing,
-                data: jasmine.anything()
-              }),
+              jasmine.objectContaining(
+                  {type: PostMessageType.verifyPing, data: jasmine.anything()}),
               '*');
     });
 
@@ -77,7 +75,8 @@ describe('AncestorOriginVerifier', () => {
               },
               (err) => {
                 expect(expectFailNow).toBeTruthy('Failed too early');
-                expect(err).toEqual(OpenYoloError.ancestorVerifyTimeout());
+                expect(err).toEqual(
+                    OpenYoloInternalError.parentVerifyTimeout());
                 done();
               });
 
@@ -91,7 +90,7 @@ describe('AncestorOriginVerifier', () => {
       let parentOrigin = permittedOrigins[0];
 
       parentFrame.addEventListener('message', (ev: MessageEvent) => {
-        expect(ev.data.type).toBe(POST_MESSAGE_TYPES.verifyPing);
+        expect(ev.data.type).toBe(PostMessageType.verifyPing);
         // simulate the response message from the valid parent origin, and
         // with the received nonce value
         providerFrame.postMessageFromOrigin(
@@ -109,7 +108,7 @@ describe('AncestorOriginVerifier', () => {
 
          let pingReceived = false;
          parentFrame.addEventListener('message', (ev: MessageEvent) => {
-           expect(ev.data.type).toBe(POST_MESSAGE_TYPES.verifyPing);
+           expect(ev.data.type).toBe(PostMessageType.verifyPing);
            pingReceived = true;
            // simulate the response message from the wrong origin
            providerFrame.postMessageFromOrigin(
@@ -122,7 +121,8 @@ describe('AncestorOriginVerifier', () => {
            done.fail('Verification should not succeed');
          } catch (err) {
            expect(pingReceived).toBeTruthy();
-           expect(err).toEqual(OpenYoloError.untrustedOrigin(parentOrigin));
+           expect(err).toEqual(
+               OpenYoloInternalError.untrustedOrigin(parentOrigin));
            done();
          }
        });
@@ -131,7 +131,7 @@ describe('AncestorOriginVerifier', () => {
       let parentOrigin = permittedOrigins[0];
 
       parentFrame.addEventListener('message', (ev: MessageEvent) => {
-        expect(ev.data.type).toBe(POST_MESSAGE_TYPES.verifyPing);
+        expect(ev.data.type).toBe(PostMessageType.verifyPing);
         // simulate the response message from the valid parent origin,
         // but with a different nonce
         providerFrame.postMessageFromOrigin(
@@ -147,7 +147,7 @@ describe('AncestorOriginVerifier', () => {
         await verifyPromise;
         done.fail('Verification should not succeed');
       } catch (err) {
-        expect(err).toEqual(OpenYoloError.ancestorVerifyTimeout());
+        expect(err).toEqual(OpenYoloInternalError.parentVerifyTimeout());
         done();
       }
     });
@@ -156,7 +156,7 @@ describe('AncestorOriginVerifier', () => {
       let parentOrigin = permittedOrigins[0];
 
       parentFrame.addEventListener('message', (ev: MessageEvent) => {
-        expect(ev.data.type).toBe(POST_MESSAGE_TYPES.verifyPing);
+        expect(ev.data.type).toBe(PostMessageType.verifyPing);
         // simulate the response message from the valid parent origin,
         // but with another ping instead of an ack
         providerFrame.postMessageFromOrigin(
@@ -169,7 +169,7 @@ describe('AncestorOriginVerifier', () => {
         await verifyPromise;
         done.fail('Verification should not succeed');
       } catch (err) {
-        expect(err).toEqual(OpenYoloError.ancestorVerifyTimeout());
+        expect(err).toEqual(OpenYoloInternalError.parentVerifyTimeout());
         done();
       }
     });
@@ -180,14 +180,14 @@ describe('AncestorOriginVerifier', () => {
 
          let pingReceived = false;
          parentFrame.addEventListener('message', (ev: MessageEvent) => {
-           expect(ev.data.type).toBe(POST_MESSAGE_TYPES.verifyPing);
+           expect(ev.data.type).toBe(PostMessageType.verifyPing);
            pingReceived = true;
            // simulate the response message from the valid parent origin,
            // but with a source that is not the provider frame
            providerFrame.dispatchEvent(createMessageEvent(
                verifyAckMessage(ev.data.data),
                parentOrigin,
-               null,
+               undefined,
                new MockWindow()));
          });
 
@@ -198,7 +198,7 @@ describe('AncestorOriginVerifier', () => {
            done.fail('Verification should not succeed');
          } catch (err) {
            expect(pingReceived).toBeTruthy();
-           expect(err).toEqual(OpenYoloError.ancestorVerifyTimeout());
+           expect(err).toEqual(OpenYoloInternalError.parentVerifyTimeout());
            done();
          }
        });
@@ -224,7 +224,8 @@ describe('AncestorOriginVerifier', () => {
       it('should reject the promise when the parent is invalid',
          async function(done) {
            let parentOrigin = 'https://www.3vil.com';
-           let expectedError = OpenYoloError.untrustedOrigin(parentOrigin);
+           let expectedError =
+               OpenYoloInternalError.untrustedOrigin(parentOrigin);
            spyOn(verifier, 'verifyAncestorOrigin')
                .and.returnValue(Promise.reject(expectedError));
            try {
@@ -245,7 +246,7 @@ describe('AncestorOriginVerifier', () => {
              await verifier.verify(false);
              done.fail('Promise should not resolve');
            } catch (err) {
-             expect(err).toEqual(OpenYoloError.parentIsNotRoot());
+             expect(err).toEqual(OpenYoloInternalError.parentIsNotRoot());
              done();
            }
          });
@@ -284,7 +285,7 @@ describe('AncestorOriginVerifier', () => {
       it('should reject the promise if any ancestor is invalid',
          async function(done) {
            let expectedError =
-               OpenYoloError.untrustedOrigin('https://www.3vil.com');
+               OpenYoloInternalError.untrustedOrigin('https://www.3vil.com');
            spyOn(verifier, 'verifyAncestorOrigin')
                .and.callFake((ancestor: any) => {
                  if (ancestor === parentFrame) {

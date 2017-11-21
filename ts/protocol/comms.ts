@@ -14,9 +14,9 @@
  * limitations under the License.
  */
 
-import {isOpenYoloMessageFormat, Message, MESSAGE_DATA_VALIDATORS, MessageDataTypes, MessageType} from './messages';
-import {PostMessageDataTypes, PostMessageType} from './post_messages';
-import {RpcMessageDataTypes, RpcMessageType} from './rpc_messages';
+import {isOpenYoloMessageFormat, Message, MESSAGE_DATA_VALIDATORS, MessageData, MessageType} from './messages';
+import {PostMessageData, PostMessageType} from './post_messages';
+import {RpcMessageData, RpcMessageType} from './rpc_messages';
 
 /**
  * Interface exposing only the required properties and methods of the Window
@@ -49,13 +49,13 @@ export function isPermittedOrigin(
 }
 
 export type PostMessageListener<T extends PostMessageType> =
-    (data: PostMessageDataTypes[T], type: T, event: MessageEvent) => void;
+    (data: PostMessageData<T>, type: T, event: MessageEvent) => void;
 
 export type RpcMessageListener<T extends RpcMessageType> =
-    (data: RpcMessageDataTypes[T], type: T, event: MessageEvent) => void;
+    (data: RpcMessageData<T>, type: T, event: MessageEvent) => void;
 
 export type MessageListener<T extends MessageType> =
-    (data: MessageDataTypes[T], type: T, event: MessageEvent) => void;
+    (data: MessageData<T>, type: T, event: MessageEvent) => void;
 
 export type FilteringEventListener = (ev: MessageEvent) => boolean;
 
@@ -68,17 +68,15 @@ export function createMessageListener<T extends MessageType>(
     type: T, listener: MessageListener<T>): FilteringEventListener {
   let messageListener = (ev: MessageEvent) => {
     if (!isOpenYoloMessageFormat(ev.data)) {
-      console.debug('non openyolo message received');
       return false;
     }
-    if (ev.data.type !== type) return false;
+    if (ev.data['type'] !== type) return false;
 
     let validator = MESSAGE_DATA_VALIDATORS[(type as MessageType)];
-    if (!validator(ev.data.data)) {
-      console.debug(`message of type ${type} received with invalid data`);
+    if (!validator(ev.data['data'])) {
       return false;
     }
-    listener(ev.data.data, ev.data.type, ev);
+    listener(ev.data['data'], ev.data['type'], ev);
     return true;
   };
 
@@ -87,7 +85,7 @@ export function createMessageListener<T extends MessageType>(
 }
 
 export interface TypedMessageEvent<T extends MessageType> extends MessageEvent {
-  data: MessageDataTypes[T];
+  data: MessageData<T>;
 }
 
 export type MessageEventListener<T extends MessageType> =

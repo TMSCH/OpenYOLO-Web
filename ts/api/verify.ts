@@ -15,7 +15,7 @@
  */
 
 import {createMessageListener, FilteringEventListener, sendMessage, WindowLike} from '../protocol/comms';
-import {POST_MESSAGE_TYPES, verifyAckMessage} from '../protocol/post_messages';
+import {PostMessageType, verifyAckMessage} from '../protocol/post_messages';
 
 let listener: FilteringEventListener;
 
@@ -24,8 +24,7 @@ export function respondToHandshake(window: WindowLike): void {
     window.removeEventListener('message', listener);
   }
   listener =
-      createMessageListener(POST_MESSAGE_TYPES.verifyPing, (data, type, ev) => {
-        console.debug(`responding to ping from ${ev.origin}`);
+      createMessageListener(PostMessageType.verifyPing, (data, type, ev) => {
         sendMessage(ev.source, verifyAckMessage(data), ev.origin);
       });
   window.addEventListener('message', listener);

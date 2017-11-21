@@ -18,7 +18,8 @@ import {Component} from '@angular/core';
 import {AfterViewChecked, OnDestroy, OnInit} from '@angular/core';
 import {ActivatedRoute} from '@angular/router';
 
-import {AffiliationProvider, AUTHENTICATION_METHODS, ClientConfigurationProvider, Credential, CredentialDataProvider, CredentialHintOptions, DisplayCallbacks, InteractionProvider, LocalStateProvider, PrimaryClientConfiguration, ProviderFrame, RENDER_MODES} from '../../../../ts/spi/spi';
+import {OpenYoloCredential as Credential, OpenYoloCredentialHintOptions as CredentialHintOptions, OpenYoloCredentialRequestOptions as CredentialRequestOptions, RenderMode} from '../../../../ts/protocol/data';
+import {AffiliationProvider, AUTHENTICATION_METHODS, ClientConfigurationProvider, CredentialDataProvider, DisplayCallbacks, InteractionProvider, LocalStateProvider, PrimaryClientConfiguration, ProviderFrame} from '../../../../ts/spi/spi';
 import {CredentialStoreService, StoredCredential} from '../credential_store/credential_store.service';
 
 @Component({
@@ -33,7 +34,7 @@ export class OpenYoloProviderComponent implements OnInit, OnDestroy,
 
   private renderPromiseResolvers: Function[] = [];
 
-  private renderMode: string;
+  renderMode: string;
 
   failed = false;
   displayCredentials: DisplayCredential[]|null;
@@ -56,20 +57,20 @@ export class OpenYoloProviderComponent implements OnInit, OnDestroy,
     });
 
     if (!this.renderMode) {
-      this.renderMode = RENDER_MODES.bottomSheet;
+      this.renderMode = RenderMode.bottomSheet;
     }
 
     this.providerFramePromise = ProviderFrame.initialize({
       allowDirectAuth: true,
       clientAuthDomain,
       clientNonce,
-      delegateToBrowser: false,
       affiliationProvider: new SimpleAffiliationProvider(),
       clientConfigurationProvider: new SimpleClientConfigurationProvider(),
       credentialDataProvider:
           new CredentialDataProviderImpl(this.credentialStoreService),
       interactionProvider: this,
-      localStateProvider: new LocalStateProviderImpl(), window
+      localStateProvider: new LocalStateProviderImpl(),
+      window
     });
 
     this.providerFramePromise.catch((err) => {
@@ -157,6 +158,12 @@ export class OpenYoloProviderComponent implements OnInit, OnDestroy,
       credential: Credential,
       displayCallbacks: DisplayCallbacks): Promise<boolean> {
     return false;
+  }
+
+  async showAutoSignIn(
+      credential: Credential,
+      displayCallbacks: DisplayCallbacks): Promise<any> {
+    return;
   }
 
   async dispose(): Promise<void> {

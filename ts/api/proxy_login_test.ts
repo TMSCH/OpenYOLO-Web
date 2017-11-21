@@ -14,13 +14,12 @@
  * limitations under the License.
  */
 
-import {AUTHENTICATION_METHODS, Credential} from '../protocol/data';
-import {OpenYoloError} from '../protocol/errors';
+import {AUTHENTICATION_METHODS, OpenYoloCredential} from '../protocol/data';
+import {OpenYoloInternalError} from '../protocol/errors';
 import {errorMessage, proxyLoginMessage, proxyLoginResponseMessage} from '../protocol/rpc_messages';
 import {SecureChannel} from '../protocol/secure_channel';
 import {FakeProviderConnection} from '../test_utils/channels';
 import {createSpyFrame} from '../test_utils/frames';
-import {JasmineTimeoutManager} from '../test_utils/timeout';
 
 import {ProxyLogin} from './proxy_login';
 
@@ -29,13 +28,11 @@ describe('ProxyLogin', () => {
   let clientChannel: SecureChannel;
   let providerChannel: SecureChannel;
   let frame: any;
-  let timeoutManager = new JasmineTimeoutManager();
-  let credential: Credential = {
+  let credential: OpenYoloCredential = {
     id: 'user@example.com',
     displayName: 'User',
     password: 'password',
     authMethod: AUTHENTICATION_METHODS.ID_AND_PASSWORD,
-    profilePicture: null,
     proxiedAuthRequired: false
   };
 
@@ -46,17 +43,10 @@ describe('ProxyLogin', () => {
     frame = createSpyFrame('frameId');
     request = new ProxyLogin(frame, clientChannel);
     spyOn(request, 'dispose').and.callThrough();
-    timeoutManager.install();
   });
 
   afterEach(() => {
     request.dispose();
-    timeoutManager.uninstall();
-  });
-
-  it('sets a 10 sec timeout', done => {
-    request.dispatch(credential).then(() => done.fail(), () => done());
-    jasmine.clock().tick(10001);
   });
 
   describe('dispatch', () => {
@@ -96,7 +86,8 @@ describe('ProxyLogin', () => {
     it('rejects if an error message is received', async function(done) {
       let promise = request.dispatch(credential);
 
-      let expectedError = OpenYoloError.requestFailed('error!');
+      let expectedError =
+          OpenYoloInternalError.requestFailed('error!').toExposedError();
       providerChannel.send(errorMessage(request.id, expectedError));
 
       try {

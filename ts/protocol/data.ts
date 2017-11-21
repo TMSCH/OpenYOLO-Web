@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import {boxEnum, indexedStrEnum, strEnum} from './enums';
+import {boxEnum, indexedStrEnum} from './enums';
 import {PasswordSpecification} from './password_spec';
 
 /**
@@ -26,7 +26,7 @@ import {PasswordSpecification} from './password_spec';
 /**
  * Represents a credential which may be usable to sign in.
  */
-export interface Credential {
+export interface OpenYoloCredential {
   /**
    * The unique identifier for the credential within the scope of the
    * authentication system. This is typically an email address, phone number
@@ -102,7 +102,7 @@ export interface Credential {
 /**
  * Encapsulates the response from the authentication system to a proxy login.
  */
-export interface ProxyLoginResponse {
+export interface OpenYoloProxyLoginResponse {
   statusCode: number;
   responseText: string;
 }
@@ -111,7 +111,7 @@ export interface ProxyLoginResponse {
  * The set of parameters passed from the client for a credential retrieval
  * request.
  */
-export interface CredentialRequestOptions {
+export interface OpenYoloCredentialRequestOptions {
   /**
    * The supported authentication methods supported by the origin, described
    * as a list of absolute, hierarchical URLs with no path. See
@@ -124,6 +124,11 @@ export interface CredentialRequestOptions {
    * optional client/provider specific configuration parameters.
    */
   supportedIdTokenProviders?: TokenProvider[];
+
+  /**
+   * Specifies the context of the request (account creating, login, etc.).
+   */
+  context?: RequestContext;
 }
 
 /**
@@ -142,13 +147,16 @@ export interface TokenProvider {
    */
   clientId?: string;
 
-  [param: string]: string;
+  /**
+   * The optional nonce value to include in any generated ID token.
+   */
+  nonce?: string;
 }
 
 /**
  * The set of parameters passed from the client for a hint retrieval request.
  */
-export interface CredentialHintOptions {
+export interface OpenYoloCredentialHintOptions {
   /**
    * The supported authentication methods supported by the origin, described
    * as a list of absolute, hierarchical URLs with no path. See
@@ -175,6 +183,11 @@ export interface CredentialHintOptions {
    * explicitly provided, `DEFAULT_PASSWORD_GENERATION_SPEC` will be used.
    */
   passwordSpec?: PasswordSpecification;
+
+  /**
+   * Specifies the context of the request (account creating, login, etc.).
+   */
+  context?: RequestContext;
 }
 
 /**
@@ -186,10 +199,25 @@ export interface CredentialHintOptions {
  *
  * - navPopout: The provider is rendered in a pop-up style at the top of the
  *   screen, with a fixed width. The
+ *
+ * A const enum is required as string enums in TypeScript get compiled with
+ * properties in quotes. For instance, the following RenderMode would be:
+ *
+ * RenderMode = {
+ *   'bottomSheet': 'bottomSheet',
+ *   'navPopout': 'navPopout',
+ *   'fullScreen': 'fullScreen'
+ * }
+ *
+ * The issue is that the references to this enum are made WITHOUT bracket
+ * notations, so the Closure Compiler does not link the reference to the
+ * definition.
  */
-export const RENDER_MODES = strEnum('bottomSheet', 'navPopout', 'fullScreen');
-
-export type RenderMode = keyof typeof RENDER_MODES;
+export const enum RenderMode {
+  bottomSheet = 'bottomSheet',
+  navPopout = 'navPopout',
+  fullScreen = 'fullScreen',
+}
 
 /**
  * A set of commonly-used federated authentication methods. This list is not
@@ -205,7 +233,7 @@ export const AUTHENTICATION_METHODS = indexedStrEnum({
   MICROSOFT: boxEnum('https://login.live.com'),
   PAYPAL: boxEnum('https://www.paypal.com'),
   TWITTER: boxEnum('https://twitter.com'),
-  YAHOO: boxEnum('https://login.yahoo.com')
+  YAHOO: boxEnum('https://login.yahoo.com'),
 });
 
 /**
@@ -218,3 +246,15 @@ export const TOKEN_PROVIDERS = indexedStrEnum({
   GOOGLE: boxEnum('https://accounts.google.com'),
   MICROSOFT: boxEnum('https://login.live.com'),
 });
+
+/**
+ * The set of request contexts that can be used when requesting a credential or
+ * a hint. It is meant for providers to optionally change the UI according to
+ * the context.
+ */
+export enum RequestContext {
+  signIn = 'signIn',
+  signUp = 'signUp',
+  continue = 'continue',
+  use = 'use',
+}

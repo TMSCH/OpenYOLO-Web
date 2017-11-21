@@ -14,10 +14,10 @@
  * limitations under the License.
  */
 
-import {OpenYoloError, OpenYoloErrorData} from '../protocol/errors';
-import {RpcMessageArgumentTypes, RpcMessageDataTypes, RpcMessageType} from '../protocol/rpc_messages';
+import {OpenYoloError, OpenYoloErrorType, OpenYoloExposedErrorData, OpenYoloInternalError} from '../protocol/errors';
+import {RpcMessageArgumentTypes, RpcMessageData, RpcMessageType} from '../protocol/rpc_messages';
 import {SecureChannel} from '../protocol/secure_channel';
-import {generateId, PromiseResolver} from '../protocol/utils';
+import {generateId, PromiseResolver, startTimeoutRacer, TimeoutRacer} from '../protocol/utils';
 
 import {ProviderFrameElement} from './provider_frame_elem';
 
@@ -36,7 +36,7 @@ export interface RelayRequest<T, O> {
   /**
    * Sends the specific request to the relay, with the given options.
    */
-  dispatch(options: O): Promise<T>;
+  dispatch(options: O, timeoutRacer?: TimeoutRacer): Promise<T>;
 }
 
 /**
@@ -54,44 +54,65 @@ export abstract class BaseRequest<ResultT, OptionsT> implements
     RelayRequest<ResultT, OptionsT> {
   private promiseResolver = new PromiseResolver<ResultT>();
   private listenerKeys: number[] = [];
-  private timeouts: number[] = [];
   private disposed = false;
+  private timeoutRacer: TimeoutRacer|null = null;
 
   constructor(
       protected frame: ProviderFrameElement,
       protected channel: SecureChannel,
-      public id = generateId()) {
-    this.debugLog('request instantiated');
-    // register a standard error handler
-    this.registerHandler('error', (data: OpenYoloErrorData) => {
-      let error: Error;
-      if (data) {
-        error = OpenYoloError.createError(data);
-      } else {
-        error = OpenYoloError.unknown();
-      }
+      public id = generateId()) {}
 
-      this.debugLog(`request failed: ${error}`);
-      this.reject(error);
+  async dispatch(options: OptionsT, timeoutRacer?: TimeoutRacer):
+      Promise<ResultT> {
+    this.timeoutRacer = timeoutRacer || startTimeoutRacer(0);
+    this.registerBaseHandlers();
+    this.dispatchInternal(options);
+    try {
+      return await this.timeoutRacer.race(this.getPromise());
+    } catch (error) {
+      // Rethrow the error unless it timed out, to keep the correct error type.
+      this.timeoutRacer.rethrowUnlessTimeoutError(error);
+      // Handle specifically a timeout error.
+      this.frame.hide();
       this.dispose();
-    });
+      throw OpenYoloInternalError.requestTimeout().toExposedError();
+    }
+  }
 
-    // register a standard handler for displaying the provider - when UI is
+  /**
+   * Method to implement in subclasses that handle the request.
+   */
+  abstract dispatchInternal(options: OptionsT): void;
+
+  /**
+   * Registers the base handlers for the request. To be called by subclasses for
+   * proper initialization.
+   */
+  private registerBaseHandlers() {
+    // Register a standard error handler.
+    this.registerHandler(
+        RpcMessageType.error, (data: OpenYoloExposedErrorData) => {
+          let error: OpenYoloError;
+          if (data) {
+            error = OpenYoloError.fromData(data);
+          } else {
+            error = OpenYoloInternalError.unknownError().toExposedError();
+          }
+
+          this.reject(error);
+          this.dispose();
+        });
+
+    // Register a standard handler for displaying the provider - when UI is
     // shown, the timeouts are also canceled to allow the operation to proceed
     // at human pace.
-    this.registerHandler('showProvider', (options) => {
-      this.clearTimeouts();
-      frame.display(options);
+    this.registerHandler(RpcMessageType.showProvider, (options) => {
+      this.clearTimeout();
+      this.frame.display(options);
     });
   }
 
-  abstract dispatch(options: OptionsT): Promise<ResultT>;
-
-  debugLog(message: string) {
-    console.debug(`(rq-${this.id}): ` + message);
-  }
-
-  getPromise(): Promise<ResultT> {
+  protected getPromise(): Promise<ResultT> {
     return this.promiseResolver.promise;
   }
 
@@ -100,9 +121,13 @@ export abstract class BaseRequest<ResultT, OptionsT> implements
     this.frame.hide();
   }
 
-  reject(reason: Error) {
+  reject(reason: OpenYoloError) {
     this.promiseResolver.reject(reason);
-    this.frame.hide();
+    // Do not hide the IFrame in case of concurrent request, to allow the
+    // previous one to finish.
+    if (reason.type !== OpenYoloErrorType.illegalConcurrentRequest) {
+      this.frame.hide();
+    }
   }
 
   /**
@@ -112,18 +137,14 @@ export abstract class BaseRequest<ResultT, OptionsT> implements
   registerHandler<T extends RpcMessageType>(
       type: T,
       handler: RpcMessageHandler<T>): void {
-    let filter =
-        (data: RpcMessageDataTypes[T], t: T, e: MessageEvent): boolean => {
-          // TODO: a TS compiler bug appears to be causing intermittent problems
-          // with resolving RpcMessageDataTypes[T]. Cast to any until this
-          // is resolved
-          let anyData = (data as any);
-          if (anyData.id !== this.id) {
-            return false;
-          }
+    let filter = (data: RpcMessageData<T>, t: T, e: MessageEvent): boolean => {
+      if (data.id !== this.id) {
+        return false;
+      }
 
-          handler(anyData.args, type, e);
-        };
+      handler(data.args, type, e);
+      return true;
+    };
     filter.toString = () => `${type} message handler`;
     this.listenerKeys.push(this.channel.listen(type, filter));
   }
@@ -139,20 +160,12 @@ export abstract class BaseRequest<ResultT, OptionsT> implements
   }
 
   /**
-   * Sets a timeout and keep the id to be able to clear it later.
+   * Clear the timeout racer.
    */
-  setAndRegisterTimeout(fn: () => void, timeout: number) {
-    this.timeouts.push(window.setTimeout(() => fn(), timeout));
-  }
-
-  /**
-   * Clears all started timeouts.
-   */
-  protected clearTimeouts(): void {
-    this.timeouts.forEach((id) => {
-      window.clearTimeout(id);
-    });
-    this.timeouts = [];
+  protected clearTimeout(): void {
+    if (this.timeoutRacer !== null) {
+      this.timeoutRacer.stop();
+    }
   }
 
   /**
@@ -162,7 +175,7 @@ export abstract class BaseRequest<ResultT, OptionsT> implements
     if (this.disposed) {
       return;
     }
-    this.clearTimeouts();
+    this.clearTimeout();
     this.clearListeners();
     this.promiseResolver.dispose();
     this.disposed = true;

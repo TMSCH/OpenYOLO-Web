@@ -15,10 +15,9 @@
  */
 
 import {WindowLike} from '../protocol/comms';
+import {RenderMode} from '../protocol/data';
 import {PreloadRequest} from '../protocol/preload_request';
 import {DisplayOptions} from '../protocol/rpc_messages';
-
-import {RENDER_MODES, RenderMode} from './api';
 
 export const HIDDEN_FRAME_CLASS = 'openyolo-hidden';
 export const VISIBLE_FRAME_CLASS = 'openyolo-visible';
@@ -78,7 +77,7 @@ export class ProviderFrameElement {
 
   constructor(
       private clientDocument: Document,
-      private instanceId: string,
+      private instanceIdHash: string,
       clientOrigin: string,
       private renderMode: RenderMode,
       providerUrlBase: string,
@@ -87,7 +86,7 @@ export class ProviderFrameElement {
     this.frameElem = this.clientDocument.createElement('iframe');
     this.frameElem.src = `${providerUrlBase}` +
         `?client=${encodeURIComponent(clientOrigin)}` +
-        `&id=${this.instanceId}` +
+        `&id=${this.instanceIdHash}` +
         `&renderMode=${renderMode}`;
 
     if (preloadRequest) {
@@ -96,6 +95,7 @@ export class ProviderFrameElement {
     }
 
     this.frameElem.className = HIDDEN_FRAME_CLASS;
+    this.frameElem.hidden = true;
     this.clientDocument.body.appendChild(this.frameElem);
   }
 
@@ -111,10 +111,11 @@ export class ProviderFrameElement {
    */
   display(options: DisplayOptions): void {
     this.frameElem.className = '';
+    this.frameElem.hidden = false;
     this.frameElem.classList.add(VISIBLE_FRAME_CLASS);
     this.frameElem.classList.add(this.renderMode);
     if ((options.height || options.width) &&
-        this.renderMode !== RENDER_MODES.fullScreen) {
+        this.renderMode !== RenderMode.fullScreen) {
       if (options.height) this.frameElem.style.height = `${options.height}px`;
       if (options.width) this.frameElem.style.width = `${options.width}px`;
     }
@@ -125,6 +126,7 @@ export class ProviderFrameElement {
    */
   hide(): void {
     this.frameElem.className = HIDDEN_FRAME_CLASS;
+    this.frameElem.hidden = true;
     this.frameElem.style.height = '';
     this.frameElem.style.width = '';
   }

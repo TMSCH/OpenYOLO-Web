@@ -17,7 +17,7 @@
 import {Component} from '@angular/core';
 
 import {openyolo} from '../../../../ts/api/api';
-import {RENDER_MODES} from '../../../../ts/protocol/data';
+import {RenderMode} from '../../../../ts/protocol/data';
 import {SettingsService} from '../app/settings.service';
 
 @Component({
@@ -34,9 +34,9 @@ export class SettingsComponent {
     this.providerUrl = settingsService.getProviderBaseUrl();
     this.renderModes = [];
     this.renderModes.push('default');
-    for (let mode of Object.getOwnPropertyNames(RENDER_MODES)) {
-      this.renderModes.push(mode);
-    }
+    this.renderModes.push(RenderMode.bottomSheet);
+    this.renderModes.push(RenderMode.navPopout);
+    this.renderModes.push(RenderMode.fullScreen);
 
     this.renderMode = settingsService.getRenderMode() || 'default';
   }
@@ -45,7 +45,11 @@ export class SettingsComponent {
     this.settingsService.setProviderBaseUrl(this.providerUrl);
     this.settingsService.setRenderMode(this.renderMode);
     openyolo.setProviderUrlBase(this.providerUrl);
-    openyolo.setRenderMode(this.renderMode);
+    openyolo.setRenderMode(this.getRenderMode());
     openyolo.reset();
+  }
+
+  private getRenderMode(): RenderMode|null {
+    return this.renderMode as RenderMode;
   }
 }

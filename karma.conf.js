@@ -15,24 +15,28 @@
  */
 
 const karma_base = require('./karma_base');
+const headless = require('./karma.headless.js');
 const saucelabs = require('./karma.saucelabs.js');
 
 module.exports = function(karma) {
   var config = Object.assign(karma_base.baseConfig, {
     autoWatch: true,
-    preprocessors: {
-      '**/*.ts': ['karma-typescript', 'coverage'],
-    },
     reporters: ['verbose', 'karma-typescript', 'coverage'],
-    coverageReporter: {type: 'lcov', dir: 'coverage/'},
-    sauceLabs: {testName: 'OpenYOLO Web'},
-    singleRun: true,
+    singleRun: true
   });
+
+  config.karmaTypescriptConfig.coverageOptions = {exclude: /_test\.ts$/};
+  config.karmaTypescriptConfig.reports = {
+    json: {filename: 'coverage-final.json'}
+  };
 
   if (process.argv.includes('--use-sauce')) {
     config.customLaunchers = saucelabs.browsers;
     config.browsers = Object.keys(saucelabs.browsers);
     config.sauceLabs.testName = 'OpenYOLO Web All Unit Tests';
+  } else if (process.env.TRAVIS) {
+    config.customLaunchers = headless.config.customLaunchers;
+    config.browsers = headless.config.browsers;
   }
 
   karma.set(config);

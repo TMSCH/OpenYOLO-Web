@@ -15,7 +15,7 @@
  */
 
 import {PrimaryClientConfiguration} from '../protocol/client_config';
-import {Credential, CredentialHintOptions} from '../protocol/data';
+import {OpenYoloCredential, OpenYoloCredentialHintOptions, OpenYoloCredentialRequestOptions} from '../protocol/data';
 import {DisplayOptions} from '../protocol/rpc_messages';
 
 /**
@@ -40,14 +40,6 @@ export interface ProviderConfiguration {
    * A pointer to the user agent window object. Included here for testability.
    */
   window: WindowLike;
-
-  /**
-   * Whether the client should use the browser credential management API
-   * for core operations, instead of this frame. This setting is not typically
-   * client-specific, and is usually determined either by the type of
-   * user agent, or by global user / provider settings.
-   */
-  delegateToBrowser: boolean;
 
   affiliationProvider: AffiliationProvider;
   clientConfigurationProvider: ClientConfigurationProvider;
@@ -90,7 +82,8 @@ export interface ClientConfigurationProvider {
   /**
    * Returns the client configuration for the specified domain, if available.
    */
-  getConfiguration(authDomain: string): Promise<PrimaryClientConfiguration>;
+  getConfiguration(authDomain: string):
+      Promise<PrimaryClientConfiguration|null>;
 }
 
 /**
@@ -101,31 +94,34 @@ export interface CredentialDataProvider {
   /**
    * Retrieves all hint credentials, based upon the provided options.
    */
-  getAllHints(options: CredentialHintOptions): Promise<Credential[]>;
+  getAllHints(options: OpenYoloCredentialHintOptions):
+      Promise<OpenYoloCredential[]>;
 
   /**
    * Retrieves all credentials for the specified authentication domains
    * (derived from the request) and the specified request options.
    */
-  getAllCredentials(authDomains: string[], options: CredentialRequestOptions):
-      Promise<Credential[]>;
+  getAllCredentials(
+      authDomains: string[],
+      options: OpenYoloCredentialRequestOptions): Promise<OpenYoloCredential[]>;
 
   /**
    * Creates or updates an existing credential. If the credential cannot be
    * created or updated, the promise should be rejected.
    */
-  upsertCredential(credential: Credential, original?: Credential):
-      Promise<Credential>;
+  upsertCredential(
+      credential: OpenYoloCredential,
+      original?: OpenYoloCredential): Promise<OpenYoloCredential>;
 
   /**
    * Deletes the provided credential from the store. If delete is not
    * permitted for this credential, the returned promise will be rejected.
    */
-  deleteCredential(credential: Credential): Promise<void>;
+  deleteCredential(credential: OpenYoloCredential): Promise<void>;
 }
 
 export interface DisplayCallbacks {
-  requestDisplayOptions(options: DisplayOptions): void;
+  requestDisplayOptions(options: DisplayOptions): Promise<void>;
 }
 
 /**
@@ -138,9 +134,9 @@ export interface InteractionProvider {
    * or reject if the action is cancelled or fails for any reason.
    */
   showCredentialPicker(
-      credentials: Credential[],
-      options: CredentialRequestOptions,
-      displayCallbacks: DisplayCallbacks): Promise<Credential>;
+      credentials: OpenYoloCredential[],
+      options: OpenYoloCredentialRequestOptions,
+      displayCallbacks: DisplayCallbacks): Promise<OpenYoloCredential>;
 
   /**
    * Requests the display of a hint picker containing the provided list of
@@ -149,9 +145,9 @@ export interface InteractionProvider {
    * not select a credential, the promise should be rejected.
    */
   showHintPicker(
-      hints: Credential[],
-      options: CredentialHintOptions,
-      displayCallbacks: DisplayCallbacks): Promise<Credential>;
+      hints: OpenYoloCredential[],
+      options: OpenYoloCredentialHintOptions,
+      displayCallbacks: DisplayCallbacks): Promise<OpenYoloCredential>;
 
   /**
    * Requests the display of a confirmation screen, allowing the user to
@@ -160,8 +156,16 @@ export interface InteractionProvider {
    * credential, false otherwise.
    */
   showSaveConfirmation(
-      credential: Credential,
+      credential: OpenYoloCredential,
       displayCallbacks: DisplayCallbacks): Promise<boolean>;
+
+  /**
+   * Requests the display of an auto sign in screen. The promise should always
+   * resolve, as no action is required.
+   */
+  showAutoSignIn(
+      credential: OpenYoloCredential,
+      displayCallbacks: DisplayCallbacks): Promise<any>;
 
   /**
    * Requests the immediate tear down of any presently active UI.
@@ -197,8 +201,9 @@ export interface LocalStateProvider {
    * timescale equivalent to what sessionStorage provides - not permanent, but
    * able to survive page turns / reinstantiation of the provider frame.
    */
-  retainCredentialForSession(authDomain: string, credential: Credential):
-      Promise<void>;
+  retainCredentialForSession(
+      authDomain: string,
+      credential: OpenYoloCredential): Promise<void>;
 
   /**
    * Retrieves a retained credential for the specified authentication domain
@@ -210,5 +215,5 @@ export interface LocalStateProvider {
    * of this interface, such that subsequent calls to this method for the same
    * domain would also return a rejected promise.
    */
-  getRetainedCredential(authDomain: string): Promise<Credential>;
+  getRetainedCredential(authDomain: string): Promise<OpenYoloCredential>;
 }

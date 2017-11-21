@@ -16,16 +16,24 @@
 
 import {PrimaryClientConfiguration} from '../protocol/client_config';
 import {sendMessage} from '../protocol/comms';
-import {AUTHENTICATION_METHODS, Credential, CredentialHintOptions, CredentialRequestOptions} from '../protocol/data';
-import {OpenYoloError} from '../protocol/errors';
+import {AUTHENTICATION_METHODS, OpenYoloCredential, OpenYoloCredentialHintOptions, OpenYoloCredentialRequestOptions} from '../protocol/data';
+import {OpenYoloInternalError} from '../protocol/errors';
 import {isOpenYoloMessageFormat} from '../protocol/messages';
 import {channelErrorMessage} from '../protocol/post_messages';
 import * as msg from '../protocol/rpc_messages';
 import {SecureChannel} from '../protocol/secure_channel';
+import {CancellablePromise} from '../protocol/utils';
 
 import {AncestorOriginVerifier} from './ancestor_origin_verifier';
 import {AffiliationProvider, CredentialDataProvider, DisplayCallbacks, InteractionProvider, LocalStateProvider, ProviderConfiguration, WindowLike} from './provider_config';
 
+/**
+ * Handles request from the client.
+ *
+ * TODO: break down this class. It is untestable. Each request handler should
+ * live in a separate class/function to abstract the messaging layer and to
+ * allow testing more thoroughly the different paths.
+ */
 export class ProviderFrame {
   private clientAuthDomain: string;
   private affiliationProvider: AffiliationProvider;
@@ -33,29 +41,28 @@ export class ProviderFrame {
   private credentialDataProvider: CredentialDataProvider;
   private interactionProvider: InteractionProvider;
   private requestInProgress = false;
+  // represents a potential cancellable operation
+  private cancellable: CancellablePromise<never>|null = null;
 
   private closeListener: EventListener;
   private window: WindowLike;
 
-  private proxyLoginCredential: Credential|null = null;
+  private proxyLoginCredential: OpenYoloCredential|null = null;
 
   /**
    * Performs the initial validation of the execution context, and then
    * instantiates a {@link ProviderFrame} instance.
    */
-  static async initialize(
-      providerConfig: ProviderConfiguration,
-      establishTimeoutMs?: number): Promise<ProviderFrame> {
-    let secureChannel: SecureChannel|null;
+  static async initialize(providerConfig: ProviderConfiguration):
+      Promise<ProviderFrame> {
     try {
       // fetch the client configuration, and ensure that the API is explicitly
       // enabled
       let clientConfiguration =
           await providerConfig.clientConfigurationProvider.getConfiguration(
               providerConfig.clientAuthDomain);
-      if (!clientConfiguration.apiEnabled) {
-        console.info('OpenYOLO API is not enabled for the client origin');
-        throw OpenYoloError.apiDisabled();
+      if (!clientConfiguration || !clientConfiguration.apiEnabled) {
+        throw OpenYoloInternalError.apiDisabled();
       }
 
       // Verify the ancestor frame(s), based on the client configuration and
@@ -77,11 +84,10 @@ export class ProviderFrame {
       }
 
       // establish a communication channel with the client
-      secureChannel = await SecureChannel.providerConnect(
+      let secureChannel = await SecureChannel.providerConnect(
           providerConfig.window,
           [providerConfig.clientAuthDomain],
-          providerConfig.clientNonce,
-          establishTimeoutMs);
+          providerConfig.clientNonce);
 
       // success! create the frame manager to handle subsequent requests
       return new ProviderFrame(
@@ -92,19 +98,17 @@ export class ProviderFrame {
 
     } catch (err) {
       // initialization failed, be courteous and notify the client as this
-      // may not actually be their fault. However, don't send the actual
-      // root cause to the client in case this leaks sensitive information.
-
-      // TODO(iainmcgin): some messages would be safe to send to the client.
-      // we could indicate this within the OpenYoloError type, with a
-      // "client safe" flag for messages that cannot contain sensitive
-      // information, and that would be useful to the client.
-      sendMessage(
-          providerConfig.window.parent,
-          channelErrorMessage(OpenYoloError.providerInitFailed()));
-
-      if (secureChannel) {
-        secureChannel.dispose();
+      // may not actually be their fault.
+      if (err instanceof OpenYoloInternalError) {
+        sendMessage(
+            providerConfig.window.parent,
+            channelErrorMessage(err.toExposedError()));
+      } else {
+        sendMessage(
+            providerConfig.window.parent,
+            channelErrorMessage(
+                OpenYoloInternalError.providerInitializationFailed()
+                    .toExposedError()));
       }
 
       throw err;
@@ -144,81 +148,95 @@ export class ProviderFrame {
   private async handleClose() {
     sendMessage(
         this.providerConfig.window.parent,
-        channelErrorMessage(OpenYoloError.canceled()));
+        channelErrorMessage(
+            OpenYoloInternalError.userCanceled().toExposedError()));
   }
 
   private registerListeners() {
     this.addRpcListener(
-        msg.RPC_MESSAGE_TYPES.wrapBrowser,
-        (m) => this.handleWrapBrowserRequest(m.id));
+        msg.RpcMessageType.disableAutoSignIn,
+        (m) => this.handleDisableAutoSignInRequest(m.id));
 
     this.addRpcListener(
-        msg.RPC_MESSAGE_TYPES.retrieve,
+        msg.RpcMessageType.retrieve,
         (m) => this.handleGetCredentialRequest(m.id, m.args));
 
     this.addRpcListener(
-        msg.RPC_MESSAGE_TYPES.hint,
-        (m) => this.handleHintRequest(m.id, m.args));
+        msg.RpcMessageType.hint, (m) => this.handleHintRequest(m.id, m.args));
 
     this.addRpcListener(
-        msg.RPC_MESSAGE_TYPES.hintAvailable,
-        (m) => this.handleHintsAvailableRequest(m.id, m.args));
+        msg.RpcMessageType.hintAvailable,
+        (m) => this.handleHintAvailableRequest(m.id, m.args));
 
     this.addRpcListener(
-        msg.RPC_MESSAGE_TYPES.save,
+        msg.RpcMessageType.save,
         (m) => this.handleSaveCredentialRequest(m.id, m.args));
 
     this.addRpcListener(
-        msg.RPC_MESSAGE_TYPES.proxy,
+        msg.RpcMessageType.proxy,
         (m) => this.handleProxyLoginRequest(m.id, m.args));
 
-    this.clientChannel.addFallbackListener(
-        (ev) => this.handleUnknownMessage(ev));
+    this.addRpcListener(
+        msg.RpcMessageType.cancelLastOperation,
+        (m) => this.handleCancelLastOperation(m.id));
+
+    this.clientChannel.addFallbackListener((ev) => {
+      this.handleUnknownMessage(ev);
+      return false;
+    });
   }
 
-  // NOTE: TS 2.1.6 appears to have a compiler bug where it does not identify
-  // that msg.RpcMessageDataTypes[T] has an id field. TS 2.2.1 does not have
-  // this issue, but the angular cli gets confused and fails to compile on
-  // the first run. To work around this problem we currently use "any"
-  // to bypass the issue.
-  // TODO: re-test this with the next release of the angular cli to see if
-  // the any wrapping can be removed.
   private addRpcListener<T extends msg.RpcMessageType>(
       type: T,
-      messageHandler: (message: msg.RpcMessageDataTypes[T]) => Promise<void>) {
+      messageHandler: (message: msg.RpcMessageData<T>) => Promise<void>) {
     this.clientChannel.listen<T>(
         type,
-        (m: msg.RpcMessageDataTypes[T], type: T, ev: MessageEvent) =>
+        (m: msg.RpcMessageData<T>, type: T, ev: MessageEvent) =>
             this.monitoringListener(type, m, messageHandler));
   }
 
   private async monitoringListener<T extends msg.RpcMessageType>(
       type: T,
-      m: msg.RpcMessageDataTypes[T],
-      messageHandler: (message: msg.RpcMessageDataTypes[T]) => Promise<void>) {
-    // TODO: a TS compiler bug appears to be causing intermittent problems
-    // with resolving RpcMessageDataTypes[T]. Cast to any until this
-    // is resolved
-    if (!this.recordRequestStart((m as any).id)) {
+      m: msg.RpcMessageData<T>,
+      messageHandler: (message: msg.RpcMessageData<T>) => Promise<void>) {
+    if (!this.recordRequestStart(type, m.id)) {
       return;
     }
 
     try {
       await messageHandler(m);
+    } catch (error) {
+      if (error && error === CancellablePromise.CANCELLED_ERROR) {
+        // reset cancellable promise, for the next set of requests
+        this.cancellable = null;
+        this.clientChannel.send(msg.errorMessage(
+            m.id, OpenYoloInternalError.operationCanceled().toExposedError()));
+      } else {
+        throw error;
+      }
     } finally {
       this.recordRequestStop();
     }
   }
 
-  private recordRequestStart(requestId: string) {
+  private recordRequestStart<T extends msg.RpcMessageType>(
+      requestType: T,
+      requestId: string) {
+    // Cancel last operation requests should not be recorded.
+    if (requestType === 'cancelLastOperation') {
+      // allow cancelLastOperation even if its a concurrent request
+      return true;
+    }
+
     if (!this.requestInProgress) {
       this.requestInProgress = true;
       return true;
     }
 
-    console.error(`Concurrent request ${requestId} received, rejecting`);
     this.clientChannel.send(msg.errorMessage(
-        requestId, OpenYoloError.illegalStateError('Concurrent request')));
+        requestId,
+        OpenYoloInternalError.illegalConcurrentRequestError()
+            .toExposedError()));
     return false;
   }
 
@@ -226,33 +244,42 @@ export class ProviderFrame {
     this.requestInProgress = false;
   }
 
-  private async handleWrapBrowserRequest(requestId: string) {
-    this.clientChannel.send(msg.wrapBrowserResultMessage(
-        requestId, this.providerConfig.delegateToBrowser));
+  private async handleDisableAutoSignInRequest(requestId: string) {
+    try {
+      await this.localStateProvider.setAutoSignInEnabled(
+          this.providerConfig.clientAuthDomain, false);
+    } catch (e) {
+      console.error('Failed to disable auto sign in.');
+    }
+    this.clientChannel.send(msg.disableAutoSignInResultMessage(requestId));
   }
 
   private async handleHintRequest(
       requestId: string,
-      options: CredentialHintOptions) {
-    console.info('Handling hint request');
-
-    let hints = await this.getHints(options);
-    if (hints.length < 1) {
-      console.info('no hints available');
-      this.clientChannel.send(msg.noneAvailableMessage(requestId));
-      return;
-    }
-
-    // user interaction is required. instruct the interaction provider to show
-    // a picker for the available credentials.
-    let selectionPromise = this.interactionProvider.showHintPicker(
-        hints, options, this.createDisplayCallbacks(requestId));
-
-    // now, wait for selection to occur, and send the selection result to the
-    // client
+      options: OpenYoloCredentialHintOptions) {
     try {
-      console.info('awaiting user selection of hint');
-      let selectedHint = await selectionPromise;
+      let hints = await this.cancellablePromise(this.getHints(options));
+      if (hints.length < 1) {
+        this.clientChannel.send(msg.errorMessage(
+            requestId,
+            OpenYoloInternalError.noCredentialsAvailable().toExposedError()));
+        return;
+      }
+
+      // user interaction is required. instruct the interaction provider to show
+      // a picker for the available credentials.
+      let selectionPromise = this.interactionProvider.showHintPicker(
+          hints, options, this.createDisplayCallbacks(requestId));
+
+
+      // now, wait for selection to occur, and send the selection result to the
+      // client
+      let selectedHint = await this.cancellablePromise(selectionPromise);
+
+      // once selected we want to set auto sign in enabled to true again
+      await this.cancellablePromise(
+          this.localStateProvider.setAutoSignInEnabled(
+              this.providerConfig.clientAuthDomain, true));
 
       // once selected, we redact the credential of any sensitive details
       selectedHint = this.copyCredential(selectedHint, true);
@@ -266,130 +293,174 @@ export class ProviderFrame {
 
       // TODO: retain the credential hint for a potential automatic save later.
 
-      console.info('Returning selected hint');
       this.clientChannel.send(
           msg.credentialResultMessage(requestId, selectedHint));
     } catch (err) {
-      console.info(`Hint selection cancelled: ${err}`);
-      this.clientChannel.send(msg.noneAvailableMessage(requestId));
+      this.handleWellKnownErrors(err);
+      if (err instanceof OpenYoloInternalError) {
+        this.clientChannel.send(
+            msg.errorMessage(requestId, err.toExposedError()));
+      } else {
+        this.clientChannel.send(msg.errorMessage(
+            requestId,
+            OpenYoloInternalError.requestFailed('Implementation error.')
+                .toExposedError()));
+      }
     }
   }
 
-  private async handleHintsAvailableRequest(
+  private async handleHintAvailableRequest(
       id: string,
-      options: CredentialHintOptions) {
-    // TODO: implement
-    return this.handleUnimplementedRequest(
-        id, msg.RPC_MESSAGE_TYPES.hintAvailable);
+      options: OpenYoloCredentialHintOptions) {
+    try {
+      const hints = await this.cancellablePromise(this.getHints(options));
+      this.clientChannel.send(
+          msg.hintAvailableResponseMessage(id, hints.length > 0));
+    } catch (err) {
+      this.handleWellKnownErrors(err);
+      if (err instanceof OpenYoloInternalError) {
+        this.clientChannel.send(msg.errorMessage(id, err.toExposedError()));
+      } else {
+        this.clientChannel.send(msg.errorMessage(
+            id,
+            OpenYoloInternalError.requestFailed('Implementation error.')
+                .toExposedError()));
+      }
+    }
   }
 
   private async handleGetCredentialRequest(
       requestId: string,
-      options: CredentialRequestOptions) {
-    console.info('Handling credential retrieve request');
+      options: OpenYoloCredentialRequestOptions) {
+    try {
+      let credentials = await this.cancellablePromise(
+          this.credentialDataProvider.getAllCredentials(
+              this.equivalentAuthDomains, options));
 
-    let credentials = await this.credentialDataProvider.getAllCredentials(
-        this.equivalentAuthDomains, options);
+      // filter out the credentials which don't match the request options
+      let pertinentCredentials =
+          credentials.filter((credential: OpenYoloCredential) => {
+            return options.supportedAuthMethods.find(
+                (value) => value === credential.authMethod);
+          });
 
-    // filter out the credentials which don't match the request options
-    let pertinentCredentials = credentials.filter((credential) => {
-      return options.supportedAuthMethods.find(
-          (value) => value === credential.authMethod);
-    });
-
-    // if no credentials are available, directly respond to the client that
-    // this is the case and the request will complete
-    if (pertinentCredentials.length < 1) {
-      console.info('no credentials available');
-      this.clientChannel.send(msg.noneAvailableMessage(requestId));
-      return;
-    }
-
-    console.info('credentials are available');
-
-    // if a single credential is available, check if auto sign-in is enabled
-    // for the client authentication domain. If it is, directly return the
-    // credential to the client, and the request will complete.
-    if (pertinentCredentials.length === 1) {
-      let autoSignInEnabled = await this.localStateProvider.isAutoSignInEnabled(
-          this.clientAuthDomain);
-      console.log(`single credential, auto sign in = ${autoSignInEnabled}`);
-      if (autoSignInEnabled) {
-        this.clientChannel.send(msg.credentialResultMessage(
-            requestId, this.storeForProxyLogin(pertinentCredentials[0])));
+      // if no credentials are available, directly respond to the client that
+      // this is the case and the request will complete
+      if (pertinentCredentials.length < 1) {
+        this.clientChannel.send(msg.errorMessage(
+            requestId,
+            OpenYoloInternalError.noCredentialsAvailable().toExposedError()));
         return;
       }
-    }
 
-    // user interaction is required. instruct the interaction provider to show
-    // a picker for the available credentials, and concurrently notify the
-    // client to show the provider frame.
-    console.info('User interaction required to release credential');
-    let selectionPromise = this.interactionProvider.showCredentialPicker(
-        pertinentCredentials, options, this.createDisplayCallbacks(requestId));
 
-    // now, wait for selection to occur, and send the selection result to the
-    // client
-    try {
-      let selectedCredential = await selectionPromise;
-      console.info('Returning selected credential');
+      // if a single credential is available, check if auto sign-in is enabled
+      // for the client authentication domain. If it is, directly return the
+      // credential to the client, and the request will complete.
+      if (pertinentCredentials.length === 1) {
+        let autoSignInEnabled =
+            await this.localStateProvider.isAutoSignInEnabled(
+                this.clientAuthDomain);
+        if (autoSignInEnabled) {
+          const credential = pertinentCredentials[0];
+          // Display the auto sign in screen and send the message.
+          await this.cancellablePromise(this.interactionProvider.showAutoSignIn(
+              credential, this.createDisplayCallbacks(requestId)));
+          this.clientChannel.send(msg.credentialResultMessage(
+              requestId, this.storeForProxyLogin(credential)));
+          return;
+        }
+      }
+
+      // user interaction is required. instruct the interaction provider to show
+      // a picker for the available credentials, and concurrently notify the
+      // client to show the provider frame.
+      let selectionPromise = this.interactionProvider.showCredentialPicker(
+          pertinentCredentials,
+          options,
+          this.createDisplayCallbacks(requestId));
+
+      // now, wait for selection to occur, and send the selection result to the
+      // client
+      let selectedCredential = await this.cancellablePromise(selectionPromise);
+
+      // once selected we want to set auto sign in enabled to true again
+      await this.cancellablePromise(
+          this.localStateProvider.setAutoSignInEnabled(
+              this.providerConfig.clientAuthDomain, true));
+
       this.clientChannel.send(msg.credentialResultMessage(
           requestId, this.storeForProxyLogin(selectedCredential)));
     } catch (err) {
-      console.info(`Credential selection cancelled: ${err}`);
-      this.clientChannel.send(msg.noneAvailableMessage(requestId));
+      this.handleWellKnownErrors(err);
+      if (err instanceof OpenYoloInternalError) {
+        this.clientChannel.send(
+            msg.errorMessage(requestId, err.toExposedError()));
+      } else {
+        this.clientChannel.send(msg.errorMessage(
+            requestId,
+            OpenYoloInternalError.requestFailed('Implementation error.')
+                .toExposedError()));
+      }
     }
   }
 
   private async handleSaveCredentialRequest(
       id: string,
-      credential: Credential) {
+      credential: OpenYoloCredential) {
     // TODO(iainmcgin): implement
-    return this.handleUnimplementedRequest(id, msg.RPC_MESSAGE_TYPES.save);
+    return this.handleUnimplementedRequest(id, msg.RpcMessageType.save);
   }
 
-  private async handleProxyLoginRequest(id: string, credential: Credential) {
+  private async handleProxyLoginRequest(
+      id: string,
+      credential: OpenYoloCredential) {
     // TODO(iainmcgin): implement
-    return this.handleUnimplementedRequest(id, msg.RPC_MESSAGE_TYPES.proxy);
+    return this.handleUnimplementedRequest(id, msg.RpcMessageType.proxy);
+  }
+
+  private async handleCancelLastOperation(id: string) {
+    if (!this.requestInProgress || this.cancellable === null) {
+      // no request in progress
+      console.warn('No pending request to cancel.');
+    } else {
+      try {
+        this.cancellable.cancel();
+      } finally {
+        // cancel any pending UI
+        this.interactionProvider.dispose();
+      }
+    }
+    this.clientChannel.send(msg.cancelLastOperationResultMessage(id));
   }
 
   /**
    * Responds to unknown request types with an error message.
    */
   private async handleUnimplementedRequest(id: string, type: string) {
-    console.error(`No implementation for request of type ${type}`);
-    this.clientChannel.send(
-        msg.errorMessage(id, OpenYoloError.unknownRequest(type)));
+    this.clientChannel.send(msg.errorMessage(
+        id, OpenYoloInternalError.unknownRequest(type).toExposedError()));
   }
 
-  private handleUnknownMessage(ev: MessageEvent): boolean {
+  private handleUnknownMessage(ev: MessageEvent) {
     if (!isOpenYoloMessageFormat(ev.data)) {
-      console.warn(
-          'Message with invalid format received on secure channel, ' +
-              'ignoring',
-          ev);
+      return;
+    }
+    if (msg.RPC_MESSAGE_TYPES.indexOf(ev.data.type) === -1) {
       return;
     }
 
-    if (!(ev.data.type in msg.RPC_MESSAGE_TYPES)) {
-      console.warn('Non-RPC message received on secure channel, ignoring');
-      return;
-    }
-
-    let type = (ev.data.type as msg.RpcMessageType);
+    const type = (ev.data.type as msg.RpcMessageType);
 
     if (!msg.RPC_MESSAGE_DATA_VALIDATORS[type](ev.data.data)) {
-      console.warn(
-          `RPC message of type ${type} contains invalid data, ` +
-          'ignoring');
       return;
     }
 
-    let data = (ev.data.data as msg.RpcMessageData<any>);
+    const data = (ev.data.data as msg.RpcMessageData<any>);
     // the message is a known, valid, but unhandled RPC message. Send a generic
     // failure message back.
-    this.clientChannel.send(
-        msg.errorMessage(data.id, OpenYoloError.unknownRequest(type)));
+    this.clientChannel.send(msg.errorMessage(
+        data.id, OpenYoloInternalError.unknownRequest(type).toExposedError()));
     return;
   }
 
@@ -398,7 +469,7 @@ export class ProviderFrame {
    * {@code this.proxyLoginCredential} and return a redacted version of the
    * credential. Otherwise, just an unredacted copy of the credential.
    */
-  private storeForProxyLogin(credential: Credential) {
+  private storeForProxyLogin(credential: OpenYoloCredential) {
     if (!credential.password ||
         (this.providerConfig.allowDirectAuth &&
          !this.clientConfig.requireProxyLogin)) {
@@ -419,12 +490,15 @@ export class ProviderFrame {
    * Provides a shallow copy of a credential, optionally redacting sensitive
    * data.
    */
-  private copyCredential(credential: Credential, redactSensitive?: boolean):
-      Credential {
+  private copyCredential(
+      credential: OpenYoloCredential,
+      redactSensitive?: boolean): OpenYoloCredential {
     let redact = !!redactSensitive;
 
-    let copy:
-        Credential = {id: credential.id, authMethod: credential.authMethod};
+    let copy: OpenYoloCredential = {
+      id: credential.id,
+      authMethod: credential.authMethod
+    };
 
     if (credential.authDomain) {
       copy.authDomain = credential.authDomain;
@@ -455,8 +529,9 @@ export class ProviderFrame {
 
   private createDisplayCallbacks(requestId: string): DisplayCallbacks {
     return {
-      requestDisplayOptions: (options: msg.DisplayOptions) => {
-        this.clientChannel.send(msg.showProviderMessage(requestId, options));
+      requestDisplayOptions: (options: msg.DisplayOptions): Promise<void> => {
+        return this.clientChannel.sendAndWaitAck(
+            msg.showProviderMessage(requestId, options));
       }
     };
   }
@@ -465,11 +540,12 @@ export class ProviderFrame {
    * Creates a list of all hints that are compatible with the specified hint
    * options, ordered from most- to least- frequently used.
    */
-  private async getHints(options: CredentialHintOptions):
-      Promise<Credential[]> {
+  private async getHints(options: OpenYoloCredentialHintOptions):
+      Promise<OpenYoloCredential[]> {
     // get all credentials across all domains; from this, we can filter down
     // to the set of credentials
-    let allCredentials = await this.credentialDataProvider.getAllHints(options);
+    let allCredentials = await this.cancellablePromise(
+        this.credentialDataProvider.getAllHints(options));
 
     if (allCredentials.length < 1) {
       return [];
@@ -477,7 +553,7 @@ export class ProviderFrame {
 
     // consolidate credentials into a map based on the credential id, and
     // record the number of credentials with that identifier.
-    let credentialsById = ({} as {[key: string]: Credential});
+    let credentialsById = ({} as {[key: string]: OpenYoloCredential});
     let credentialCount = ({} as {[key: string]: number});
     let numRetained = 0;
     allCredentials.forEach((credential) => {
@@ -511,7 +587,7 @@ export class ProviderFrame {
     // extract and reorder the credentials from the map into a most- to
     // least-frequently ocurring order.
 
-    let hintCredentials: Credential[] = [];
+    let hintCredentials: OpenYoloCredential[] = [];
     for (let credentialId in credentialsById) {
       if (credentialsById.hasOwnProperty(credentialId)) {
         hintCredentials.push(credentialsById[credentialId]);
@@ -536,7 +612,7 @@ export class ProviderFrame {
    * information it contains is. This can be used to compare credentials and
    * favor those with more information.
    */
-  private completenessScore(credential: Credential): number {
+  private completenessScore(credential: OpenYoloCredential): number {
     let score = 0;
     if (credential.authMethod !== AUTHENTICATION_METHODS.ID_AND_PASSWORD) {
       score += 4;
@@ -551,5 +627,23 @@ export class ProviderFrame {
     }
 
     return score;
+  }
+
+  private cancellablePromise<T>(producer: Promise<T>): Promise<T> {
+    // creates a new cancellable promise if and only if one does not already
+    // exist for the provider frame. This should get reset only when a cancel
+    // signal has already been caught.
+    if (!this.cancellable) {
+      this.cancellable = new CancellablePromise();
+    }
+    return Promise.race([this.cancellable.promise, producer]) as Promise<T>;
+  }
+
+  private handleWellKnownErrors(error: Error) {
+    // we must let well known errors bubble up, so they
+    // are caught by the monitoring handler.
+    if (error === CancellablePromise.CANCELLED_ERROR) {
+      throw error;
+    }
   }
 }

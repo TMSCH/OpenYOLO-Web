@@ -14,45 +14,31 @@
  * limitations under the License.
  */
 
-import {Credential, CredentialHintOptions} from '../protocol/data';
-import {OpenYoloError} from '../protocol/errors';
-import {hintMessage, RPC_MESSAGE_TYPES} from '../protocol/rpc_messages';
+import {OpenYoloCredential, OpenYoloCredentialHintOptions} from '../protocol/data';
+import {hintMessage, RpcMessageType} from '../protocol/rpc_messages';
 
 import {BaseRequest} from './base_request';
-
-const TIMEOUT_MS = 5000;
 
 /**
  * Handles the get hint request, by displaying the IFrame or not to let
  * the user selects a hint, if any is available.
  */
 export class HintRequest extends
-    BaseRequest<Credential, CredentialHintOptions|undefined> {
+    BaseRequest<OpenYoloCredential, OpenYoloCredentialHintOptions|undefined> {
   /**
    * Starts the Hint Request flow.
    */
-  dispatch(options: CredentialHintOptions): Promise<Credential> {
+  dispatchInternal(options: OpenYoloCredentialHintOptions) {
     this.registerHandler(
-        RPC_MESSAGE_TYPES.credential,
-        (credential: Credential) => this.handleResult(credential));
-    this.registerHandler(RPC_MESSAGE_TYPES.none, () => this.handleResult(null));
-
-    this.setAndRegisterTimeout(() => {
-      this.reject(OpenYoloError.requestTimeout());
-      this.dispose();
-    }, TIMEOUT_MS);
-
-    this.debugLog(`Sending hint request`);
+        RpcMessageType.credential,
+        (credential: OpenYoloCredential) => this.handleResult(credential));
     this.channel.send(hintMessage(this.id, options));
-    return this.getPromise();
   }
 
   /**
    * Handles the initial response from a hint request.
    */
-  private handleResult(credential: Credential|null): void {
-    this.debugLog(`Hint request complete`);
-    this.clearTimeouts();
+  private handleResult(credential: OpenYoloCredential): void {
     this.resolve(credential);
     this.dispose();
   }

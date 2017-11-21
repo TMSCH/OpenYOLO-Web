@@ -14,37 +14,27 @@
  * limitations under the License.
  */
 
-import {CredentialHintOptions} from '../protocol/data';
-import {hintAvailableMessage, RPC_MESSAGE_TYPES} from '../protocol/rpc_messages';
+import {OpenYoloCredentialHintOptions} from '../protocol/data';
+import {hintAvailableMessage, RpcMessageType} from '../protocol/rpc_messages';
 
 import {BaseRequest} from './base_request';
-
-const DEFAULT_TIMEOUT_MS = 1000;
 
 /**
  * Handles the check for whether hints are available or not. It does not require
  * any user interaction, and if fails, just return as if there was no hints.
  */
 export class HintAvailableRequest extends
-    BaseRequest<boolean, CredentialHintOptions> {
+    BaseRequest<boolean, OpenYoloCredentialHintOptions> {
   /**
    * Sends the RPC to the IFrame and waits for the result.
    */
-  dispatch(options: CredentialHintOptions, timeoutMs?: number):
-      Promise<boolean> {
+  dispatchInternal(options: OpenYoloCredentialHintOptions) {
     this.registerHandler(
-        RPC_MESSAGE_TYPES.hintAvailableResult, (available: boolean) => {
-          this.clearTimeouts();
+        RpcMessageType.hintAvailableResult, (available: boolean) => {
           this.resolve(available);
           this.dispose();
         });
 
-    this.setAndRegisterTimeout(() => {
-      this.resolve(false);
-      this.dispose();
-    }, (timeoutMs && timeoutMs > 0) ? timeoutMs : DEFAULT_TIMEOUT_MS);
-
     this.channel.send(hintAvailableMessage(this.id, options));
-    return this.getPromise();
   }
 }

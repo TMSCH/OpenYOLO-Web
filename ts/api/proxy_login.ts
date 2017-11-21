@@ -14,33 +14,26 @@
  * limitations under the License.
  */
 
-import {Credential, ProxyLoginResponse} from '../protocol/data';
-import {OpenYoloError} from '../protocol/errors';
-import {proxyLoginMessage, RPC_MESSAGE_TYPES} from '../protocol/rpc_messages';
+import {OpenYoloCredential, OpenYoloProxyLoginResponse} from '../protocol/data';
+import {proxyLoginMessage, RpcMessageType} from '../protocol/rpc_messages';
 
 import {BaseRequest} from './base_request';
-
-const TIMEOUT_MS = 10000;
 
 /**
  * Handles the proxy login.
  */
-export class ProxyLogin extends BaseRequest<ProxyLoginResponse, Credential> {
+export class ProxyLogin extends
+    BaseRequest<OpenYoloProxyLoginResponse, OpenYoloCredential> {
   /**
    * Starts the Proxy Login flow.
    */
-  dispatch(credential: Credential): Promise<ProxyLoginResponse> {
+  dispatchInternal(credential: OpenYoloCredential) {
     this.registerHandler(
-        RPC_MESSAGE_TYPES.proxyResult, (response: ProxyLoginResponse) => {
+        RpcMessageType.proxyResult, (response: OpenYoloProxyLoginResponse) => {
           this.resolve(response);
           this.dispose();
         });
-    this.setAndRegisterTimeout(() => {
-      this.reject(OpenYoloError.requestTimeout());
-      this.dispose();
-    }, TIMEOUT_MS);
 
     this.channel.send(proxyLoginMessage(this.id, credential));
-    return this.getPromise();
   }
 }

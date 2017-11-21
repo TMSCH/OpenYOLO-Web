@@ -14,50 +14,63 @@
  * limitations under the License.
  */
 
-import {Credential as OpenYoloCredential, CredentialRequestOptions as OpenYoloCredentialRequestOptions} from '../protocol/data';
+import {OpenYoloCredential as OpenYoloCredential, OpenYoloCredentialRequestOptions as OpenYoloCredentialRequestOptions} from '../protocol/data';
 import {AUTHENTICATION_METHODS} from '../protocol/data';
+import {InternalErrorCode, OpenYoloErrorType, OpenYoloInternalError} from '../protocol/errors';
 
-import {NavigatorCredentials} from './navigator_credentials';
+import {OpenYoloApi} from './api';
+import {NavigatorCredentials, NoOpNavigatorCredentials} from './navigator_credentials';
 
 describe('NavigatorCredentials', () => {
   if (!navigator.credentials) {
     // Only test browsers with navigator.credentials implemented (Chrome).
     return;
   }
-  let navigatorCredentials: NavigatorCredentials;
+  let cmApi = navigator.credentials!;
+  let navigatorCredentials: OpenYoloApi;
 
   beforeEach(() => {
-    navigatorCredentials = new NavigatorCredentials();
+    navigatorCredentials = new NavigatorCredentials(cmApi);
+  });
+
+  describe('disableAutoSignIn', () => {
+    it('resolves when success', (done) => {
+      spyOn(cmApi, 'requireUserMediation').and.returnValue(Promise.resolve());
+      navigatorCredentials.disableAutoSignIn().then(done);
+    });
+
+    it('resolves when insecure origin error', (done) => {
+      spyOn(cmApi, 'requireUserMediation')
+          .and.returnValue(Promise.reject(new Error('Insecure origin!')));
+      navigatorCredentials.disableAutoSignIn().then(done);
+    });
   });
 
   describe('retrieve', () => {
     it('returns the federated credential', done => {
-      let federatedCredential: FederatedCredential = {
-        provider: AUTHENTICATION_METHODS.GOOGLE,
-        protocol: null,
-        name: 'Name',
-        iconURL: 'icon.jpg',
-        type: 'federated',
-        id: 'user@example.com'
-      };
-      spyOn(navigator.credentials, 'get')
-          .and.returnValue(Promise.resolve(federatedCredential));
-      let options: OpenYoloCredentialRequestOptions = {
+      const options: OpenYoloCredentialRequestOptions = {
         supportedAuthMethods: [AUTHENTICATION_METHODS.GOOGLE]
       };
+      const federatedCredential = new FederatedCredential({
+        provider: AUTHENTICATION_METHODS.GOOGLE,
+        protocol: 'openidconnect',
+        name: 'Name',
+        iconURL: 'https://www.example.com/icon.jpg',
+        id: 'user@example.com'
+      });
+      spyOn(cmApi, 'get').and.returnValue(Promise.resolve(federatedCredential));
       navigatorCredentials.retrieve(options).then(credential => {
-        expect(navigator.credentials.get)
-            .toHaveBeenCalledWith(jasmine.objectContaining({
-              password: false,
-              federated:
-                  {providers: [AUTHENTICATION_METHODS.GOOGLE], protocols: []},
-              unmediated: false
-            }));
+        expect(cmApi.get).toHaveBeenCalledWith(jasmine.objectContaining({
+          password: false,
+          federated:
+              {providers: [AUTHENTICATION_METHODS.GOOGLE], protocols: []},
+          unmediated: false
+        }));
         expect(credential).toEqual({
           id: 'user@example.com',
           authMethod: AUTHENTICATION_METHODS.GOOGLE,
           displayName: 'Name',
-          profilePicture: 'icon.jpg',
+          profilePicture: 'https://www.example.com/icon.jpg',
           proxiedAuthRequired: false
         });
         done();
@@ -65,64 +78,80 @@ describe('NavigatorCredentials', () => {
     });
 
     it('returns the password credential', done => {
-      let passwordCredential: PasswordCredential = {
+      const options: OpenYoloCredentialRequestOptions = {
+        supportedAuthMethods: [AUTHENTICATION_METHODS.ID_AND_PASSWORD]
+      };
+      const passwordCredential = new PasswordCredential({
         name: 'Name',
-        iconURL: 'icon.jpg',
+        iconURL: 'https://www.example.com/icon.jpg',
         type: 'password',
         id: 'user@example.com',
         idName: 'username',
         passwordName: 'password',
+        password: 'password',
         additionalData: null
-      };
-      spyOn(navigator.credentials, 'get')
-          .and.returnValue(Promise.resolve(passwordCredential));
-      let options: OpenYoloCredentialRequestOptions = {
-        supportedAuthMethods: [AUTHENTICATION_METHODS.ID_AND_PASSWORD]
-      };
+      });
+      spyOn(cmApi, 'get').and.returnValue(Promise.resolve(passwordCredential));
       navigatorCredentials.retrieve(options).then(credential => {
-        expect(navigator.credentials.get)
-            .toHaveBeenCalledWith(jasmine.objectContaining({
-              password: true,
-              federated: {providers: [], protocols: []},
-              unmediated: false
-            }));
+        expect(cmApi.get).toHaveBeenCalledWith(jasmine.objectContaining({
+          password: true,
+          federated: {providers: [], protocols: []},
+          unmediated: false
+        }));
         expect(credential).toEqual(jasmine.objectContaining({
           id: 'user@example.com',
           authMethod: AUTHENTICATION_METHODS.ID_AND_PASSWORD,
           displayName: 'Name',
-          profilePicture: 'icon.jpg',
-          proxiedAuthRequired: true
+          profilePicture: 'https://www.example.com/icon.jpg',
+          proxiedAuthRequired: false,
+          password: 'password'
         }));
         done();
       });
     });
 
-    it('returns nothing', done => {
-      spyOn(navigator.credentials, 'get').and.returnValue(Promise.resolve());
-      navigatorCredentials.retrieve().then(credential => {
-        expect(credential).toBeUndefined();
-        done();
-      });
+    it('rejects when no credential', done => {
+      const options: OpenYoloCredentialRequestOptions = {
+        supportedAuthMethods: [AUTHENTICATION_METHODS.GOOGLE]
+      };
+      spyOn(cmApi, 'get').and.returnValue(Promise.resolve());
+      navigatorCredentials.retrieve(options).then(
+          credential => {
+            done.fail('Should not resolve!');
+          },
+          (error) => {
+            expect(OpenYoloInternalError.errorIs(
+                error, InternalErrorCode.noCredentialsAvailable));
+            done();
+          });
     });
 
     it('fails', done => {
-      let expectedError = new Error('ERROR!');
-      spyOn(navigator.credentials, 'get')
-          .and.returnValue(Promise.reject(expectedError));
-      navigatorCredentials.retrieve().then(
+      const options: OpenYoloCredentialRequestOptions = {
+        supportedAuthMethods: [AUTHENTICATION_METHODS.GOOGLE]
+      };
+      const expectedError = new Error('ERROR!');
+      spyOn(cmApi, 'get').and.returnValue(Promise.reject(expectedError));
+      navigatorCredentials.retrieve(options).then(
           () => {
             done.fail('Unexpected success!');
           },
           error => {
-            expect(error).toBe(expectedError);
+            expect(error.type).toEqual(OpenYoloErrorType.requestFailed);
             done();
           });
     });
   });
 
+  describe('cancelLastOperation', () => {
+    it('always resolves', done => {
+      navigatorCredentials.cancelLastOperation().then(done);
+    });
+  });
+
   describe('save', () => {
     it('saves the password credential', done => {
-      let credential: OpenYoloCredential = {
+      const credential: OpenYoloCredential = {
         id: 'user@example.com',
         authMethod: AUTHENTICATION_METHODS.ID_AND_PASSWORD,
         displayName: 'Name',
@@ -130,8 +159,8 @@ describe('NavigatorCredentials', () => {
         proxiedAuthRequired: false,  // Does not matter but required.
         password: 'password'
       };
-      let fakeSavedCred = {};
-      spyOn(navigator.credentials, 'store').and.callFake((cred: any) => {
+      const fakeSavedCred = {};
+      spyOn(cmApi, 'store').and.callFake((cred: any) => {
         expect(cred instanceof PasswordCredential).toBe(true);
         expect(cred.id).toEqual('user@example.com');
         expect(cred.name).toEqual('Name');
@@ -142,15 +171,15 @@ describe('NavigatorCredentials', () => {
     });
 
     it('saves the federated credential', done => {
-      let credential: OpenYoloCredential = {
+      const credential: OpenYoloCredential = {
         id: 'user@example.com',
         authMethod: AUTHENTICATION_METHODS.GOOGLE,
         displayName: 'Name',
         profilePicture: 'http://www.example.com/icon.jpg',
         proxiedAuthRequired: false  // Does not matter but required.
       };
-      let fakeSavedCred = {};
-      spyOn(navigator.credentials, 'store').and.callFake((cred: any) => {
+      const fakeSavedCred = {};
+      spyOn(cmApi, 'store').and.callFake((cred: any) => {
         expect(cred instanceof FederatedCredential).toBe(true);
         expect(cred.id).toEqual('user@example.com');
         expect(cred.provider).toEqual(AUTHENTICATION_METHODS.GOOGLE);
@@ -162,10 +191,9 @@ describe('NavigatorCredentials', () => {
     });
 
     it('fails', done => {
-      let expectedError = new Error('ERROR!');
-      spyOn(navigator.credentials, 'store')
-          .and.returnValue(Promise.reject(expectedError));
-      let credential: OpenYoloCredential = {
+      const expectedError = new Error('ERROR!');
+      spyOn(cmApi, 'store').and.returnValue(Promise.reject(expectedError));
+      const credential: OpenYoloCredential = {
         id: 'user@example.com',
         authMethod: AUTHENTICATION_METHODS.GOOGLE,
         displayName: 'Name',
@@ -178,14 +206,19 @@ describe('NavigatorCredentials', () => {
                 done.fail('Unexpected success!');
               },
               error => {
-                expect(error).toBe(expectedError);
+                expect(error.type).toEqual(OpenYoloErrorType.requestFailed);
                 done();
               });
     });
   });
 
   describe('proxyLogin', () => {
+    const options: OpenYoloCredentialRequestOptions = {
+      supportedAuthMethods: [AUTHENTICATION_METHODS.ID_AND_PASSWORD]
+    };
+
     let credential: PasswordCredential;
+
     beforeEach(() => {
       credential = {
         name: 'Name',
@@ -199,7 +232,7 @@ describe('NavigatorCredentials', () => {
     });
 
     it('fetches with the correct credential', done => {
-      let otherCredential: PasswordCredential = {
+      const otherCredential: PasswordCredential = {
         name: 'Name 2',
         iconURL: 'icon.jpg',
         type: 'password',
@@ -208,26 +241,26 @@ describe('NavigatorCredentials', () => {
         passwordName: 'password',
         additionalData: null
       };
-      let expectedResponse = {
+      const expectedResponse = {
         status: 200,
         text: () => {
           return Promise.resolve('Signed in!');
         }
       };
-      let getSpy = spyOn(navigator.credentials, 'get');
+      const getSpy = spyOn(cmApi, 'get');
       getSpy.and.returnValue(Promise.resolve(otherCredential));
       // We cannot test for the value of credentials passed to fetch method, as
       // once the Request object is created (with the `credentials` param), its
       // `credentials` property is set to "password". Any idea to properly test
       // is welcome.
       spyOn(window, 'fetch').and.returnValue(Promise.resolve(expectedResponse));
-      navigatorCredentials.retrieve()
-          .then(cred => {
+      navigatorCredentials.retrieve(options)
+          .then((cred) => {
             // Second call is the credential to use.
             getSpy.and.returnValue(Promise.resolve(credential));
-            return navigatorCredentials.retrieve();
+            return navigatorCredentials.retrieve(options);
           })
-          .then(cred => {
+          .then((cred) => {
             return navigatorCredentials.proxyLogin(cred);
           })
           .then((response) => {
@@ -238,24 +271,26 @@ describe('NavigatorCredentials', () => {
     });
 
     it('fetches return status different than 200 reject the promise', done => {
-      let expectedResponse = {status: 400};
-      spyOn(navigator.credentials, 'get')
-          .and.returnValue(Promise.resolve(credential));
+      const expectedResponse = {status: 400};
+      spyOn(cmApi, 'get').and.returnValue(Promise.resolve(credential));
       spyOn(window, 'fetch').and.returnValue(Promise.resolve(expectedResponse));
-      navigatorCredentials.retrieve().then(cred => {
+      navigatorCredentials.retrieve(options).then((cred) => {
         navigatorCredentials.proxyLogin(cred).then(
             (response) => {
               done.fail('Unexpected success!');
             },
             (error) => {
-              expect(error.message).toEqual('Error: status code 400');
+              expect(error.type).toEqual(OpenYoloErrorType.requestFailed);
+              expect(error.message)
+                  .toContain(
+                      'The API request failed to resolve: Status code 400');
               done();
             });
       });
     });
 
     it('requires the credential to be fetched first', done => {
-      let cred = {
+      const cred = {
         id: 'user@example.com',
         authMethod: AUTHENTICATION_METHODS.ID_AND_PASSWORD,
         displayName: 'Name',
@@ -267,9 +302,84 @@ describe('NavigatorCredentials', () => {
             done.fail('Unexpected success!');
           },
           (error) => {
-            expect(error.message).toEqual('Invalid credential!');
+            expect(error.type).toEqual(OpenYoloErrorType.requestFailed);
+            expect(error.message).toContain('Invalid credential.');
             done();
           });
+    });
+  });
+
+  describe('NoOp implementation', () => {
+    beforeEach(() => {
+      navigatorCredentials = new NoOpNavigatorCredentials();
+    });
+
+    it('retrieve', (done) => {
+      navigatorCredentials.retrieve({supportedAuthMethods: []})
+          .then(
+              () => {
+                done.fail('Should not resolve!');
+              },
+              (error) => {
+                expect(error.type)
+                    .toEqual(OpenYoloErrorType.noCredentialsAvailable);
+                done();
+              });
+    });
+
+    it('hint', (done) => {
+      navigatorCredentials.hint({supportedAuthMethods: []})
+          .then(
+              () => {
+                done.fail('Should not resolve!');
+              },
+              (error) => {
+                expect(error.type)
+                    .toEqual(OpenYoloErrorType.noCredentialsAvailable);
+                done();
+              });
+    });
+
+    it('hintsAvaialble', (done) => {
+      navigatorCredentials.hintsAvailable({supportedAuthMethods: []})
+          .then(done);
+    });
+
+    it('save', (done) => {
+      const cred = {
+        id: 'user@example.com',
+        authMethod: AUTHENTICATION_METHODS.ID_AND_PASSWORD,
+        displayName: 'Name',
+        profilePicture: 'photo.jpg',
+        isProxyLoginRequired: true
+      };
+      navigatorCredentials.save(cred).then(done);
+    });
+
+    it('proxyLogin', (done) => {
+      const cred = {
+        id: 'user@example.com',
+        authMethod: AUTHENTICATION_METHODS.ID_AND_PASSWORD,
+        displayName: 'Name',
+        profilePicture: 'photo.jpg',
+        isProxyLoginRequired: true
+      };
+      navigatorCredentials.proxyLogin(cred).then(
+          () => {
+            done.fail('Should not resolve!');
+          },
+          (error) => {
+            expect(error.type).toEqual(OpenYoloErrorType.requestFailed);
+            done();
+          });
+    });
+
+    it('disableAutoSignIn', (done) => {
+      navigatorCredentials.disableAutoSignIn().then(done);
+    });
+
+    it('disableAutcancelLastOperationoSignIn', (done) => {
+      navigatorCredentials.cancelLastOperation().then(done);
     });
   });
 });
